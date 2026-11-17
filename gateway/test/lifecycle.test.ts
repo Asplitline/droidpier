@@ -5,7 +5,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startAvd, stopAvd, type LifecycleDeps } from "../src/lifecycle.ts";
-import { repairAvdTarget } from "../src/avd.ts";
+import { repairAvdKeyboard, repairAvdTarget } from "../src/avd.ts";
 import type { AvdInfo } from "../../shared/protocol.ts";
 import type { Running } from "../src/discovery.ts";
 
@@ -36,6 +36,8 @@ function fakes(
     undiscovered?: boolean;
     /** 启动前修 target 时抛错 */
     repairFails?: boolean;
+    /** 启动前修键盘配置时抛错 */
+    repairKeyboardFails?: boolean;
     /** 启动前修 target 用真的 repairAvdTarget，AVD 目录在这里；不给时不修 */
     avdHome?: string;
   } = {},
@@ -47,6 +49,8 @@ function fakes(
   const logs = new Map<string, string>();
   // 每次拉起模拟器时它看到的 <name>.ini（给了 avdHome 才记）
   const iniAtSpawn: string[] = [];
+  // 每次拉起模拟器时它看到的 config.ini（给了 avdHome 才记）
+  const configAtSpawn: string[] = [];
   const deps: LifecycleDeps = {
     now: () => now,
     sleep: async (ms) => {
@@ -60,11 +64,19 @@ function fakes(
       if (opts.repairFails) throw new Error("读不到 .ini");
       if (opts.avdHome) await repairAvdTarget(name, { avdHome: opts.avdHome });
     },
+    repairKeyboard: async (name) => {
+      if (opts.repairKeyboardFails) throw new Error("读不到 config.ini");
+      if (opts.avdHome) await repairAvdKeyboard(name, { avdHome: opts.avdHome });
+    },
     listAvds: async () => opts.avds ?? [{ name: "A", running: "no" }, { name: "B", running: "no" }],
     findRunning: async (name) => (opts.preRunning?.avdName === name ? opts.preRunning : opts.undiscovered ? null : (booted.get(name) ?? null)),
     alive: () => opts.deadAtMs === undefined || now < opts.deadAtMs,
     spawn: (cmd, args, logPath) => {
-      if (opts.avdHome) iniAtSpawn.push(readFileSync(join(opts.avdHome, `${args[args.indexOf("-avd") + 1]}.ini`), "utf8"));
+      if (opts.avdHome) {
+        const avd = args[args.indexOf("-avd") + 1];
+        iniAtSpawn.push(readFileSync(join(opts.avdHome, `${avd}.ini`), "utf8"));
+        configAtSpawn.push(readFileSync(join(opts.avdHome, `${avd}.avd/config.ini`), "utf8"));
+      }
       logs.set(logPath, opts.log ?? "");
       const cbs: Array<(code: number | null) => void> = [];
       const s: Spawned = { cmd, args, killed: false, unref: false, exit: (code) => cbs.splice(0).forEach((cb) => cb(code)) };
@@ -85,15 +97,15 @@ function fakes(
       return Promise.resolve("");
     },
   };
-  return { deps, spawned, execs, iniAtSpawn, now: () => now };
+  return { deps, spawned, execs, iniAtSpawn, configAtSpawn, now: () => now };
 }
 
-/** 一台 target 写坏的 AVD A：<home>/A.ini 是 target=android-0，镜像是 android-36.1。 */
+/** 一台旧版 Droidpier 建的 AVD A：<home>/A.ini 是 target=android-0，镜像是 android-36.1，config.ini 里 hw.keyboard = no。 */
 async function brokenAvdHome(t: import("node:test").TestContext): Promise<string> {
   const home = await mkdtemp(join(tmpdir(), "emu-lifecycle-test-"));
   t.after(() => rm(home, { recursive: true, force: true }));
   await mkdir(join(home, "A.avd"));
-  await writeFile(join(home, "A.avd/config.ini"), "image.sysdir.1=system-images/android-36.1/google_apis_playstore/arm64-v8a/\n");
+  await writeFile(join(home, "A.avd/config.ini"), "image.sysdir.1=system-images/android-36.1/google_apis_playstore/arm64-v8a/\nhw.keyboard = no\n");
   await writeFile(join(home, "A.ini"), `path=${join(home, "A.avd")}\ntarget=android-0\n`);
   return home;
 }
@@ -121,6 +133,24 @@ test("已经在运行的 AVD 直接接管，不去改它的 .ini", async (t) => 
   const f = fakes({ avds: [{ name: "A", running: "grpc" }], preRunning: pre, avdHome });
   await startAvd("A", f.deps).done;
   assert.match(await readFile(join(avdHome, "A.ini"), "utf8"), /^target=android-0$/m);
+  assert.match(await readFile(join(avdHome, "A.avd/config.ini"), "utf8"), /^hw\.keyboard = no$/m);
+});
+
+test("没开实体键盘的 AVD：模拟器拉起时 config.ini 已经是 hw.keyboard=yes", async (t) => {
+  const avdHome = await brokenAvdHome(t);
+  const f = fakes({ avdHome });
+  const job = startAvd("A", f.deps);
+  await job.done;
+  assert.equal(job.progress, "ready");
+  assert.equal(f.configAtSpawn.length, 1);
+  assert.match(f.configAtSpawn[0], /^hw\.keyboard=yes$/m);
+});
+
+test("修正键盘配置失败不挡启动", async () => {
+  const f = fakes({ repairKeyboardFails: true });
+  const job = startAvd("A", f.deps);
+  await job.done;
+  assert.equal(job.progress, "ready");
 });
 
 test("重复 start 返回同一个进行中的任务", async () => {
