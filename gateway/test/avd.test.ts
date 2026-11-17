@@ -4,7 +4,7 @@ import { chmod, lstat, readdir, readFile, rename, rm, symlink } from "node:fs/pr
 import { mkdtemp, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
-import { parseAvdConfig, listAvds, renameAvd, repairAvdTarget, deleteAvd } from "../src/avd.ts";
+import { parseAvdConfig, listAvds, renameAvd, repairAvdTarget, repairAvdKeyboard, deleteAvd } from "../src/avd.ts";
 import { parseDiscovery } from "../src/discovery.ts";
 
 const fixturesDir = join(import.meta.dirname, "fixtures/avd");
@@ -428,4 +428,35 @@ test("deleteAvd 删文件时出错：页面只看到“详情见网关日志”�
   const e: Error = await deleteAvd("A", deps).then(() => assert.fail("应当失败"), (e) => e).finally(() => chmod(home, 0o700));
   assert.equal(e.message, "删除 A 失败，详情见网关日志");
   assert.ok(e.cause instanceof Error && e.cause.message.includes(home), String(e.cause));
+});
+
+test("repairAvdKeyboard 把 hw.keyboard = no 改成 yes，其他行和 CRLF 换行不动", async (t) => {
+  const { deps, configPath } = await oneAvd(t, "hw.dPad = no\r\nhw.keyboard = no\r\nhw.keyboard.charmap = qwerty2\r\n");
+  assert.equal(await repairAvdKeyboard("Resizable_Experimental", deps), true);
+  assert.equal(await readFile(configPath, "utf8"), "hw.dPad = no\r\nhw.keyboard=yes\r\nhw.keyboard.charmap = qwerty2\r\n");
+});
+
+test("repairAvdKeyboard 对已经开着的 hw.keyboard（yes / true / 1，不分大小写）什么都不改", async (t) => {
+  for (const config of ["hw.keyboard=yes\n", "hw.keyboard = TRUE\n", "hw.keyboard=1\nhw.keyboard.lid=no\n"]) {
+    const { deps, configPath } = await oneAvd(t, config);
+    assert.equal(await repairAvdKeyboard("Resizable_Experimental", deps), false);
+    assert.equal(await readFile(configPath, "utf8"), config);
+  }
+});
+
+test("repairAvdKeyboard 没写 hw.keyboard 时补在末尾（模拟器默认是 no）", async (t) => {
+  const { deps, configPath } = await oneAvd(t, "hw.lcd.width=1080\nhw.keyboard.charmap=qwerty2");
+  assert.equal(await repairAvdKeyboard("Resizable_Experimental", deps), true);
+  assert.equal(await readFile(configPath, "utf8"), "hw.lcd.width=1080\nhw.keyboard.charmap=qwerty2\nhw.keyboard=yes\n");
+});
+
+test("repairAvdKeyboard 把 NO、false、0 和重复的行都改成 yes，hw.keyboard.lid 不动", async (t) => {
+  const { deps, configPath } = await oneAvd(t, "hw.keyboard=NO\nhw.keyboard.lid=no\nhw.keyboard = false\nhw.keyboard=0\n");
+  assert.equal(await repairAvdKeyboard("Resizable_Experimental", deps), true);
+  assert.equal(await readFile(configPath, "utf8"), "hw.keyboard=yes\nhw.keyboard.lid=no\nhw.keyboard=yes\nhw.keyboard=yes\n");
+});
+
+test("repairAvdKeyboard 没有这台 AVD 时返回 false，不抛错", async (t) => {
+  const { deps } = await oneAvd(t, "");
+  assert.equal(await repairAvdKeyboard("Nope", deps), false);
 });

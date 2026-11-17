@@ -214,6 +214,36 @@ export async function repairAvdTarget(name: string, deps?: Partial<Pick<Deps, "a
   return target;
 }
 
+/**
+ * 打开 AVD 的实体键盘：config.ini 里 hw.keyboard 没写或不是开着的，改成 yes，改了返回 true；已经开着或读不到时返回 false。
+ * 网关的按键（导航键、打字）都走模拟器 gRPC 的 sendKey，没开实体键盘时模拟器不建键盘设备，按键全部丢掉，
+ * 触摸照常（2026-11-17 实测 emulator 37.1.11：getevent 收不到 EV_KEY，改成 yes 冷启动后出现 qwerty2，按键生效）。
+ * 没写这一项也算关着：SDK 的 emulator/lib/hardware-properties.ini 里 hw.keyboard 默认 no。
+ * 带 quickboot 快照的 AVD 改了之后快照载不进（Failed to load snapshot），模拟器自己冷启动，键盘照样生效（同日实测）。
+ * 新建的 AVD 已经写 yes（avd-create.ts）；这里修旧版网关或 avdmanager 建的。
+ */
+export async function repairAvdKeyboard(name: string, deps?: Partial<Pick<Deps, "avdHome">>): Promise<boolean> {
+  const found = await resolveConfigIni(deps?.avdHome ?? defaultAvdHome(), name);
+  const text = found ? await readFile(found, "utf8").catch(() => null) : null;
+  if (!found || text === null) return false;
+  // 只认键名正好是 hw.keyboard 的行（hw.keyboard.lid 等不算）；每行的 \r 原样留着，不改动文件的换行风格
+  const line = /^hw\.keyboard[ \t]*=[ \t]*(.*?)[ \t]*(\r?)$/gm;
+  const values = [...text.matchAll(line)].map((m) => m[1].toLowerCase());
+  if (values.length > 0 && values.every((v) => v === "yes" || v === "true" || v === "1")) return false;
+  const fixed = values.length > 0 ? text.replace(line, "hw.keyboard=yes$2") : `${text === "" || text.endsWith("\n") ? text : `${text}\n`}hw.keyboard=yes\n`;
+  const path = await realpath(found);
+  const { mode } = await stat(path);
+  const tmp = `${path}.droidpier-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  try {
+    await writeFile(tmp, fixed, { mode });
+    await rename(tmp, path);
+  } catch (e) {
+    await rm(tmp, { force: true });
+    throw e;
+  }
+  return true;
+}
+
 /** 把 text（ini）里 key 的每一行都换成 key=value（重复的行也换，读的一方取哪行都对）；没有这一行就加在末尾。 */
 function setIniValue(text: string, key: string, value: string): string {
   const isKey = (l: string) => l.includes("=") && l.slice(0, l.indexOf("=")).trim() === key;

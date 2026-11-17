@@ -3,7 +3,7 @@ import { closeSync, mkdirSync, openSync } from "node:fs";
 import { open } from "node:fs/promises";
 import net from "node:net";
 import { dirname } from "node:path";
-import { listAvds, repairAvdTarget } from "./avd.ts";
+import { listAvds, repairAvdKeyboard, repairAvdTarget } from "./avd.ts";
 import { findOwnRunning, pidAlive, type Running } from "./discovery.ts";
 import { emulatorBin, emulatorEnv, emulatorLogPath } from "./platform.ts";
 import { bootLogHint, bootLogReason, bootStuckDetail } from "./boot-log.ts";
@@ -30,6 +30,8 @@ export type LifecycleDeps = {
   listAvds: () => Promise<AvdInfo[]>;
   /** 拉起模拟器前修正 AVD 写坏的 target（见 repairAvdTarget）。 */
   repairTarget: (name: string) => Promise<unknown>;
+  /** 拉起模拟器前打开 AVD 的实体键盘（见 repairAvdKeyboard）。 */
+  repairKeyboard: (name: string) => Promise<unknown>;
   findRunning: (name: string) => Promise<Running | null>;
   alive: (pid: number) => boolean;
   portFree: (port: number) => Promise<boolean>;
@@ -111,6 +113,7 @@ const defaults: LifecycleDeps = {
   readLog: readTail,
   listAvds: () => listAvds(),
   repairTarget: (name) => repairAvdTarget(name),
+  repairKeyboard: (name) => repairAvdKeyboard(name),
   findRunning: (name) => findOwnRunning(name),
   alive: pidAlive,
   portFree,
@@ -173,6 +176,7 @@ export function startAvd(name: string, deps?: Partial<LifecycleDeps>): StartJob 
 
     // 修不了也照样启动：最坏是开得慢，不该因此起不来
     await d.repairTarget(name).catch((e) => console.warn(`修正 ${name} 的 target 失败：${e instanceof Error ? e.message : String(e)}`));
+    await d.repairKeyboard(name).catch((e) => console.warn(`打开 ${name} 的实体键盘失败：${e instanceof Error ? e.message : String(e)}`));
 
     let port = GRPC_BASE_PORT;
     for (;; port += 2) {

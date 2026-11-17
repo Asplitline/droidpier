@@ -76,6 +76,7 @@ test("emulator -avd 带着网关算出的 ANDROID_AVD_HOME 启动", async (t) =>
     logPath: () => log,
     listAvds: async () => [{ name: "Env_Probe", running: "no" } as never],
     repairTarget: async () => {},
+    repairKeyboard: async () => {},
     findRunning: async () => null,
     portFree: async () => true,
     sleep: (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 20))),
